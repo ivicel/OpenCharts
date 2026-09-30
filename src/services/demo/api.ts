@@ -1,15 +1,19 @@
 import type { DrawingLine } from "../../pages/trading/constants.ts";
 import type { Candle } from "../schemas.ts";
-import { getHistory } from "./candles.ts";
+import { getCandlesLatest, getCandlesRange } from "../market-source/index.ts";
 import * as engine from "./engine.ts";
 import { DEMO_SYMBOLS } from "./instruments.ts";
 
 /**
  * Demo-mode API. Replaces the HTTP client for everything the terminal needs:
  * trading actions hit the in-browser paper engine, market data comes from the
- * bundled real OHLC, and chart drawings persist to localStorage. Methods not
- * implemented here fall through to a benign stub (see services/api.ts).
+ * market-source facade (live exchange when reachable, bundled history offline),
+ * and chart drawings persist to localStorage. Methods not implemented here fall
+ * through to a benign stub (see services/api.ts).
  */
+
+/** Used when a caller omits `limit` — matches the size of the bundled dataset. */
+const DEFAULT_CANDLE_LIMIT = 1000;
 
 const DEMO_USER = {
   id: "demo-user",
@@ -61,8 +65,26 @@ const chartDrawings = {
 
 const candlesMeta = (candles: Candle[]) => ({
   candles,
-  metadata: { isPartial: false, backfillQueued: false, historicalCoverageStart: null },
+  metadata: {
+    isPartial: false,
+    backfillQueued: false,
+    historicalCoverageStart: candles[0] ? candles[0].time * 1000 : null,
+  },
 });
+
+/**
+ * Single entry point for OHLC. `range` wins when present (scroll-back and Bar
+ * Replay need arbitrary windows); otherwise the newest `limit` bars are served.
+ */
+function fetchCandles(
+  symbol: string,
+  timeframe: string,
+  limit?: number,
+  range?: { fromMs: number; toMs: number },
+): Promise<Candle[]> {
+  if (range) return getCandlesRange(symbol, timeframe, range.fromMs, range.toMs, limit);
+  return getCandlesLatest(symbol, timeframe, limit ?? DEFAULT_CANDLE_LIMIT);
+}
 
 export const demoApi = {
   // ── Auth (no real auth in demo) ──
@@ -129,10 +151,18 @@ export const demoApi = {
 
   // ── Symbols & market data ──
   getSymbols: () => Promise.resolve(DEMO_SYMBOLS),
-  getCandles: (symbol: string, timeframe: string, limit?: number) =>
-    Promise.resolve(getHistory(symbol, timeframe, limit)),
-  getCandlesWithMeta: (symbol: string, timeframe: string, limit?: number) =>
-    Promise.resolve(candlesMeta(getHistory(symbol, timeframe, limit))),
+  getCandles: (
+    symbol: string,
+    timeframe: string,
+    limit?: number,
+    range?: { fromMs: number; toMs: number },
+  ) => fetchCandles(symbol, timeframe, limit, range),
+  getCandlesWithMeta: async (
+    symbol: string,
+    timeframe: string,
+    limit?: number,
+    range?: { fromMs: number; toMs: number },
+  ) => candlesMeta(await fetchCandles(symbol, timeframe, limit, range)),
   getTick: (symbol: string) => {
     const price = engine.getLastPrice(symbol);
     return Promise.resolve({ symbol, bid: price, ask: price, timestamp: Date.now() });

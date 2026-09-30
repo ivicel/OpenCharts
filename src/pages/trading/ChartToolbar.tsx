@@ -13,6 +13,7 @@ import {
   Clock,
   Crosshair,
   Equal,
+  History,
   Info,
   Layers,
   Layers3,
@@ -95,6 +96,10 @@ export interface ChartToolbarProps {
   isReplaying?: boolean;
   /** Account whose sessions can be replayed — mounts the replay HUD when set. */
   replayAccountId?: string | null;
+  /** Bar Replay session is running — the toolbar button reflects it. */
+  barReplayActive?: boolean;
+  /** Enter / leave Bar Replay. */
+  onBarReplayToggle?: () => void;
   activePlugins?: string[];
   onTogglePlugin?: (id: string) => void;
   /** Replace the full indicator list (template load). Enables the templates menu. */
@@ -130,6 +135,8 @@ export function ChartToolbar({
   aiTraderEnabled,
   isReplaying = false,
   replayAccountId,
+  barReplayActive = false,
+  onBarReplayToggle,
   activePlugins = [],
   onTogglePlugin,
   onSetIndicators,
@@ -287,14 +294,14 @@ export function ChartToolbar({
         </div>
       )}
 
-      {/* Timeframe Selector — locked to 1m while a replay session is active */}
+      {/* Timeframe Selector — locked while a replay session is active */}
       <div className="flex items-center gap-0.5 ml-1 shrink-0">
         {TIMEFRAMES.map((tf) => (
           <button
             key={tf}
             onClick={() => onTimeframeChange(tf)}
             disabled={isReplaying}
-            title={isReplaying ? "Timeframe is fixed to 1m during replay" : undefined}
+            title={isReplaying ? "Timeframe is locked during replay" : undefined}
             className={cn(
               "px-2 py-1 rounded-md text-xs font-medium transition-all",
               tf === timeframe
@@ -310,6 +317,23 @@ export function ChartToolbar({
 
       {/* Session replay controls — disabled until the feature is QA'd */}
       {REPLAY_ENABLED && replayAccountId != null && <ReplayHUD accountId={replayAccountId} />}
+
+      {/* Bar Replay — client-side, TradingView-style */}
+      {onBarReplayToggle && (
+        <button
+          onClick={onBarReplayToggle}
+          title={barReplayActive ? "Exit bar replay" : "Bar replay — pick a starting bar"}
+          className={cn(
+            "flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-all shrink-0 ml-1",
+            barReplayActive
+              ? "bg-orange-500 text-white shadow-sm"
+              : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <History className="h-3 w-3" />
+          Replay
+        </button>
+      )}
 
       {/* Chart layout templates (save/load/autosave) */}
       {onSetIndicators && onSetPlugins && (

@@ -4,6 +4,24 @@ export const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"] as 
 export type Timeframe = (typeof TIMEFRAMES)[number];
 
 /**
+ * How much history the chart loads after its fast first paint.
+ *
+ * Bar Replay freezes a snapshot with the same depth, so the two requests cover
+ * an identical window and the second one is served entirely from the candle
+ * cache instead of hitting the exchange again.
+ */
+export const DEEP_CANDLE_LIMIT: Record<Timeframe, number> = {
+  "1m": 3_000,
+  "5m": 5_000,
+  "15m": 12_000,
+  "30m": 8_000,
+  "1h": 8_760,
+  "4h": 2_500,
+  "1d": 1_000,
+  "1w": 520,
+};
+
+/**
  * Master switch for session replay (HUD + scrubber). Disabled on the live
  * terminal until the feature is fully QA'd — flip to `true` to re-enable the
  * replay controls everywhere they mount.

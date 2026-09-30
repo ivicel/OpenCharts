@@ -8,7 +8,7 @@
  * consumer (MarketDataBridge, ConnectionIndicator, store, …) had to change.
  */
 import { publish, subscribeChannel, type ChannelHandler } from "./demo/bus.ts";
-import { startDemoFeed } from "./demo/feed.ts";
+import { startMarketFeed, stopMarketFeed } from "./demo/feed.ts";
 
 export type ConnectionState = "connected" | "connecting" | "reconnecting" | "disconnected";
 export type WsHandler = ChannelHandler;
@@ -28,7 +28,7 @@ class DemoWsClient {
 
   connect(_token?: string): void {
     this.setState("connecting");
-    startDemoFeed();
+    startMarketFeed();
     // Resolve to connected on the next tick so onStateChange subscribers
     // registered synchronously after connect() still receive the transition.
     setTimeout(() => this.setState("connected"), 0);
@@ -36,6 +36,7 @@ class DemoWsClient {
 
   disconnect(): void {
     this.setState("disconnected");
+    stopMarketFeed();
   }
 
   reauthenticate(_token: string): void {

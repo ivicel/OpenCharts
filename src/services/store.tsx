@@ -302,6 +302,13 @@ interface TradingState {
   replayCursorTimestamp: number | null;
   /** Session date (YYYY-MM-DD) of the active replay, set when replay starts. */
   replaySessionDate: string | null;
+  /**
+   * True while a client-side Bar Replay session owns the chart. Live ticks and
+   * candle updates must not be applied — replay prices come from its own cursor.
+   */
+  liveFeedSuppressed: boolean;
+
+  setLiveFeedSuppressed: (suppressed: boolean) => void;
 
   setActiveAccount: (id: string) => void;
   loadAccounts: () => Promise<void>;
@@ -339,6 +346,9 @@ export const useTradingStore = create<TradingState>((set, get) => ({
   replaySpeed: 1,
   replayCursorTimestamp: null,
   replaySessionDate: null,
+  liveFeedSuppressed: false,
+
+  setLiveFeedSuppressed: (suppressed) => set({ liveFeedSuppressed: suppressed }),
 
   setActiveAccount: (id) => {
     localStorage.setItem("active_account", id);

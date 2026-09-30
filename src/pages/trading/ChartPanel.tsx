@@ -98,6 +98,9 @@ function requestGapRefetch(
 const LOAD_MORE_THRESHOLD = 20; // trigger when fewer than N bars remain on the left
 const LOAD_MORE_WINDOW = 500; // how many interval-widths to fetch per extension
 
+/** Empty bars kept to the right of the replay cursor (the "unwritten future"). */
+const REPLAY_RIGHT_PADDING = 4;
+
 type LoadMoreState = {
   loading: boolean;
   noMoreData: boolean;
@@ -172,10 +175,13 @@ function makeHistoryLoader(
   seriesRef: { current: ISeriesApi<"Candlestick"> | null },
   stateRef: { current: LoadMoreState },
   onLoaded: (bars: Candle[]) => void,
+  /** Extra gate, checked per scroll event (used to disable loading in replay). */
+  shouldLoad?: () => boolean,
 ): (range: LogicalRange | null) => void {
   return (range) => {
     const series = seriesRef.current;
     if (!range || !series) return;
+    if (shouldLoad && !shouldLoad()) return;
     const state = stateRef.current;
     if (!isLoadMoreEligible(state, series, range)) return;
     // Use the shifted boundary from a prior empty-range response when present,
@@ -259,6 +265,16 @@ export interface ChartPanelProps {
    * staleness watchdog must not treat the old last-bar as a data gap.
    */
   isReplaying?: boolean;
+  /** Bar Replay: waiting for the user to click the starting bar. */
+  replayPickMode?: boolean;
+  /** Bar Replay: a starting bar was clicked, reported as a time in seconds. */
+  onReplayPickTime?: (timeSec: number) => void;
+  /** Bar Replay: time (seconds) of the newest revealed bar, or null. */
+  replayCursorTime?: number | null;
+  /** Bar Replay: pin the cursor near the right edge as it advances. */
+  replayFollow?: boolean;
+  /** Bar Replay: the user panned or zoomed, so following should stop. */
+  onReplayFollowBreak?: () => void;
 }
 
 // ── Chart plugin overlays ─────────────────────────────────────────────────────
@@ -1102,6 +1118,11 @@ export function ChartPanel({
   onClearDrawings,
   onClearIndicators,
   isReplaying = false,
+  replayPickMode = false,
+  onReplayPickTime,
+  replayCursorTime = null,
+  replayFollow = false,
+  onReplayFollowBreak,
 }: ChartPanelProps) {
   const queryClient = useQueryClient();
   const lastGapRefetchAtRef = useRef<number>(0);
@@ -1129,6 +1150,15 @@ export function ChartPanel({
   const bidLineRef = useRef<IPriceLine | null>(null);
   const askLineRef = useRef<IPriceLine | null>(null);
   const midLineRef = useRef<IPriceLine | null>(null);
+
+  // ── Bar Replay bookkeeping ──
+  // Mirrored into a ref because the history loader is created once, inside the
+  // chart-creation effect, and must not be re-created when replay starts.
+  const replayActiveRef = useRef(isReplaying);
+  // The logical range we last pinned the viewport to while following the cursor.
+  // Comparing it against the live range is how manual panning is detected,
+  // without depending on event timing.
+  const lastPinnedRangeRef = useRef<LogicalRange | null>(null);
 
   // ── SL/TP drag-to-edit state ──
   const slTpLinesRef = useRef<SlTpMap>(new Map());
@@ -1245,6 +1275,9 @@ export function ChartPanel({
     drawingManagerRef.current?.setStayInDrawingMode(stayInDrawingMode);
   }, [stayInDrawingMode]);
   useEffect(() => {
+    replayActiveRef.current = isReplaying;
+  }, [isReplaying]);
+  useEffect(() => {
     onAddDrawingRef.current = onAddDrawing;
     onUpdateDrawingRef.current = onUpdateDrawing;
     onRemoveDrawingRef.current = onRemoveDrawing;
@@ -1286,10 +1319,17 @@ export function ChartPanel({
   // ── Extracted hooks ────────────────────────────────────────
   // Merge scroll-loaded historical extension (older) with the live data (newer).
   // useChartData deduplicates by timestamp, so overlap is safe.
-  const allCandles = useMemo(
-    () => (historicalExtra.length === 0 ? candles : [...historicalExtra, ...candles]),
-    [historicalExtra, candles],
-  );
+  //
+  // While replaying, bars newer than the cursor must be dropped: `historicalExtra`
+  // was fetched relative to the *live* window, so entering a replay whose start
+  // point sits further back would otherwise reveal bars from the user's future.
+  const allCandles = useMemo(() => {
+    const extra =
+      isReplaying && replayCursorTime != null
+        ? historicalExtra.filter((bar) => bar.time <= replayCursorTime)
+        : historicalExtra;
+    return extra.length === 0 ? candles : [...extra, ...candles];
+  }, [historicalExtra, candles, isReplaying, replayCursorTime]);
   const { chartData, volumeData } = useChartData(allCandles, colors);
 
   const {
@@ -1414,6 +1454,12 @@ export function ChartPanel({
 
   // ── Candle close countdown timer ───────────────────────────
   useEffect(() => {
+    // Replay renders a historical slice — a live "bar closes in…" countdown
+    // would be counting down to a bar that replay has not reached yet.
+    if (isReplaying) {
+      setCountdown("");
+      return;
+    }
     const intervalMs = TF_INTERVAL_MS[timeframe];
     if (!intervalMs || intervalMs >= 86_400_000) {
       setCountdown("");
@@ -1429,7 +1475,7 @@ export function ChartPanel({
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [timeframe]);
+  }, [timeframe, isReplaying]);
 
   // ── Create / destroy the chart instance ────────────────────
   useEffect(() => {
@@ -1623,6 +1669,10 @@ export function ChartPanel({
       (bars) => {
         if (!historyLoadCancelled) setHistoricalExtra((prev) => [...bars, ...prev]);
       },
+      // Replay holds a frozen slice: pulling older bars is fine in principle,
+      // but the loader must never run while the viewport is being pinned to the
+      // replay cursor — it would fight the follow-scroll on every frame.
+      () => !replayActiveRef.current,
     );
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleRangeChange);
 
@@ -1810,8 +1860,10 @@ export function ChartPanel({
     lastLoadKeyRef.current = loadKey;
     liveCandleTsRef.current = 0;
     replayBufferedLive(buffered, chartData, ctx);
+    // Replay's last bar is deliberately old — never treat it as a stalled feed.
+    if (isReplaying) return;
     return scheduleStaleRefetch(chartData, ctx);
-  }, [chartData, volumeData, selectedSymbol, timeframe, makeRtCtx]);
+  }, [chartData, volumeData, selectedSymbol, timeframe, makeRtCtx, isReplaying]);
 
   // ── Real-time candle updates ──────────────────────────
 
@@ -1877,6 +1929,61 @@ export function ChartPanel({
     return () => clearInterval(id);
   }, [selectedSymbol, timeframe, queryClient, isReplaying]);
 
+  // ── Bar Replay: click-to-pick the starting bar ─────────────
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !replayPickMode || !onReplayPickTime) return;
+    const handleClick = (param: { time?: Time }) => {
+      // Only candle (UTC timestamp) points are pickable; business-day points
+      // belong to other chart types and never occur here.
+      if (typeof param.time !== "number") return;
+      onReplayPickTime(param.time);
+    };
+    chart.subscribeClick(handleClick);
+    return () => chart.unsubscribeClick(handleClick);
+  }, [replayPickMode, onReplayPickTime, chartEpoch]);
+
+  // ── Bar Replay: pin the cursor near the right edge ──────────
+  // Without this the viewport never moves: revealing a bar just squeezes the
+  // existing window leftwards, which is the opposite of how replay should read.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    if (!chart || !series || !isReplaying || !replayFollow) return;
+    const barCount = series.data().length;
+    if (barCount === 0) return;
+
+    const current = chart.timeScale().getVisibleLogicalRange();
+    const visibleBars = current ? Math.max(20, Math.round(current.to - current.from)) : 120;
+    // lightweight-charts brands logical indices; the arithmetic above is plain
+    // numbers, so cast at the boundary rather than threading the brand through.
+    const pinned: LogicalRange = {
+      from: (barCount - visibleBars + 1) as LogicalRange["from"],
+      to: (barCount + REPLAY_RIGHT_PADDING) as LogicalRange["to"],
+    };
+    lastPinnedRangeRef.current = pinned;
+    chart.timeScale().setVisibleLogicalRange(pinned);
+  }, [isReplaying, replayFollow, replayCursorTime, chartEpoch]);
+
+  // ── Bar Replay: manual pan/zoom stops following ────────────
+  // Detected by comparing the live range against the range we last pinned —
+  // our own scroll lands exactly on it, so no event-timing heuristic is needed.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !isReplaying || !replayFollow || !onReplayFollowBreak) return;
+    const handleRangeChange = () => {
+      const pinned = lastPinnedRangeRef.current;
+      if (!pinned) return;
+      const live = chart.timeScale().getVisibleLogicalRange();
+      if (!live) return;
+      if (Math.abs(live.from - pinned.from) > 1.5 || Math.abs(live.to - pinned.to) > 1.5) {
+        onReplayFollowBreak();
+      }
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleRangeChange);
+    return () => chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleRangeChange);
+  }, [isReplaying, replayFollow, onReplayFollowBreak, chartEpoch]);
+
   // ── Chart plugin overlays ──────────────────────────────────
   // Re-runs when active plugins change or the chart is recreated (isDark /
   // symbol / timeframe), so primitives are always attached to the live series.
@@ -1939,7 +2046,7 @@ export function ChartPanel({
   ]);
 
   return (
-    <div className="relative w-full h-full">
+    <div className={cn("relative w-full h-full", replayPickMode && "cursor-crosshair")}>
       {/* OHLCV Legend Overlay */}
       <ChartLegendHeader
         selectedSymbol={selectedSymbol}

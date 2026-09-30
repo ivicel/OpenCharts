@@ -22,6 +22,7 @@ export function App() {
       // OpenCharts paper trades genuinely execute against the in-browser engine,
       // so this is a real (non-demo) session — clears the "trading disabled" gate.
       localStorage.setItem("is_demo", "false");
+      localStorage.setItem("theme", "light");
       useAuthStore.setState({ isDemo: false });
       await Promise.all([loadSymbols(), loadAccounts()]);
       if (!cancelled) setReady(true);

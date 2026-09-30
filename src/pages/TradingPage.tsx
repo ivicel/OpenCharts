@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsFeedConnected } from "../components/ConnectionIndicator.tsx";
+import { MarketSourceBadge } from "../components/MarketSourceBadge.tsx";
 import { MobileAccountBar, MobileTradingPanel } from "../components/MobileTradingPanel.tsx";
 import {
   OrderConfirmDialog,
@@ -41,6 +42,7 @@ import { ChartToolbar } from "./trading/ChartToolbar.tsx";
 import {
   type DrawingTool,
   type MagnetMode,
+  DEEP_CANDLE_LIMIT,
   REPLAY_ENABLED,
   TIMEFRAMES,
   type Timeframe,
@@ -49,6 +51,9 @@ import { DOMPanel } from "./trading/DOMPanel.tsx";
 import { MarketClosedBanner } from "./trading/MarketClosedBanner.tsx";
 import { OrderPanel } from "./trading/OrderPanel.tsx";
 import { ReplayScrubber } from "./trading/ReplayScrubber.tsx";
+import { ReplayControls } from "./trading/bar-replay/ReplayControls.tsx";
+import { useBarReplay } from "./trading/bar-replay/useBarReplay.ts";
+import { useBarReplayStore, visibleCandles } from "./trading/bar-replay/replayStore.ts";
 import { useReplayChartData } from "./trading/useReplayChartData.ts";
 import { useReplayPlayback } from "./trading/useReplayPlayback.ts";
 import { getPipDigits } from "./trading/utils.ts";
@@ -317,28 +322,7 @@ export function TradingPage() {
   }, []);
 
   // Deep-history target used after the initial fast render completes.
-  const deepCandleLimit = useMemo(() => {
-    switch (timeframe) {
-      case "1m":
-        return 3_000;
-      case "5m":
-        return 5_000;
-      case "15m":
-        return 12_000;
-      case "30m":
-        return 8_000;
-      case "1h":
-        return 8_760;
-      case "4h":
-        return 2_500;
-      case "1d":
-        return 1_000;
-      case "1w":
-        return 520;
-      default:
-        return 5_000;
-    }
-  }, [timeframe]);
+  const deepCandleLimit = DEEP_CANDLE_LIMIT[timeframe];
   // First paint: viewport-sized so the initial fetch is as small as possible.
   // Mobile (<768px) needs fewer bars to fill the screen; desktop gets more.
   // The deep-history fetch fires 400ms later and loads a full year of data.
@@ -372,6 +356,34 @@ export function TradingPage() {
     updateChartPreferences({ magnetMode: next });
   }, [chartPrefs.magnetMode]);
   useReplayPlayback(activeAccountId ?? "");
+
+  // ── Bar Replay (client-side, TradingView-style) ──────────────
+  // Renders from its own frozen snapshot, so it never reads (or writes) the
+  // live candle query — the live feed is suppressed further down instead.
+  const barReplayStatus = useBarReplayStore((s) => s.status);
+  const barReplaySymbol = useBarReplayStore((s) => s.symbol);
+  const barReplayTimeframe = useBarReplayStore((s) => s.timeframe);
+  const barReplayBars = useBarReplayStore((s) => s.bars);
+  const barReplayCursorIndex = useBarReplayStore((s) => s.cursorIndex);
+  const barReplayFollow = useBarReplayStore((s) => s.follow);
+  useBarReplay();
+
+  const barReplayActive = barReplayStatus !== "off";
+  const barReplayCandles = useMemo(
+    () => (barReplayActive ? visibleCandles(barReplayBars, barReplayCursorIndex) : null),
+    [barReplayActive, barReplayBars, barReplayCursorIndex],
+  );
+  const barReplayCursorTime =
+    barReplayActive && barReplayCursorIndex >= 0
+      ? (barReplayBars[barReplayCursorIndex]?.time ?? null)
+      : null;
+
+  // A snapshot describes exactly one instrument; switching symbol ends replay.
+  useEffect(() => {
+    if (barReplayActive && barReplaySymbol && barReplaySymbol !== selectedSymbol) {
+      useBarReplayStore.getState().exit();
+    }
+  }, [barReplayActive, barReplaySymbol, selectedSymbol]);
   const { data: positions = [] } = usePositions(activeAccountId);
   const { data: orders = [] } = useOrders(activeAccountId);
   const chartPositions = chartPrefs.overlayPositionsOnChart ? positions : [];
@@ -442,8 +454,14 @@ export function TradingPage() {
         tick={tick}
         symbolInfo={symbolInfo}
         aiTraderEnabled={aiTraderEnabled?.enabled ?? false}
-        isReplaying={isReplaying}
+        isReplaying={isReplaying || barReplayActive}
         replayAccountId={activeAccountId}
+        barReplayActive={barReplayActive}
+        onBarReplayToggle={() => {
+          const store = useBarReplayStore.getState();
+          if (store.status === "off") store.begin(selectedSymbol, timeframe);
+          else store.exit();
+        }}
         activePlugins={activePlugins}
         onTogglePlugin={handleTogglePlugin}
         onSetIndicators={setActiveIndicators}
@@ -457,6 +475,7 @@ export function TradingPage() {
       />
 
       <MarketClosedBanner symbolInfo={symbolInfo} />
+      <MarketSourceBadge />
 
       {/* ── Main Layout ──────────────────────────────────── */}
       <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
@@ -465,9 +484,9 @@ export function TradingPage() {
           {/* Chart Area */}
           <div className="flex-1 min-h-[200px] relative">
             <ChartPanel
-              candles={replayCandles ?? candles}
+              candles={barReplayCandles ?? replayCandles ?? candles}
               selectedSymbol={selectedSymbol}
-              timeframe={replayCandles ? "1m" : timeframe}
+              timeframe={barReplayActive ? (barReplayTimeframe ?? timeframe) : replayCandles ? "1m" : timeframe}
               isDark={isDark}
               activeIndicators={activeIndicators}
               drawingTool={drawingTool}
@@ -483,13 +502,18 @@ export function TradingPage() {
               stayInDrawingMode={chartPrefs.stayInDrawingMode}
               positions={chartPositions}
               orders={chartOrders}
-              tick={replayCandles ? undefined : tick}
-              liveCandle={replayCandles ? undefined : liveCandle}
+              tick={barReplayActive || replayCandles ? undefined : tick}
+              liveCandle={barReplayActive || replayCandles ? undefined : liveCandle}
               pipDigits={pipDigits}
               symbolInfo={symbolInfo}
               onModifyPosition={handleChartModifyPosition}
               replayTradeEvents={replayTradeEvents}
-              isReplaying={isReplaying}
+              isReplaying={isReplaying || barReplayActive}
+              replayPickMode={barReplayStatus === "picking"}
+              onReplayPickTime={(timeSec) => useBarReplayStore.getState().pickStartAt(timeSec)}
+              replayCursorTime={barReplayCursorTime}
+              replayFollow={barReplayActive && barReplayFollow}
+              onReplayFollowBreak={() => useBarReplayStore.getState().setFollow(false)}
               activePlugins={activePlugins}
               onTogglePlugin={handleTogglePlugin}
               accountEquity={account?.equity ?? account?.balance ?? 0}
@@ -498,7 +522,20 @@ export function TradingPage() {
               onClearDrawings={clearDrawings}
               onClearIndicators={handleClearIndicators}
             />
+
+            {/* "Pick a starting bar" hint. Gated on there actually being
+                candles to click: before history lands a chart click carries no
+                time, so the invitation has to wait rather than swallow it. */}
+            {barReplayStatus === "picking" &&
+              (barReplayActive ? barReplayBars : (replayCandles ?? candles)).length > 0 && (
+                <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20 rounded-md border border-orange-500/40 bg-card/95 px-3 py-1.5 text-[11px] font-medium text-orange-500 shadow-lg">
+                  Click a bar on the chart to set the replay starting point
+                </div>
+              )}
           </div>
+
+          {/* Bar Replay transport */}
+          <ReplayControls />
 
           {/* Replay timeline scrubber — disabled until the feature is QA'd */}
           {REPLAY_ENABLED && isReplaying && activeAccountId != null && (
@@ -606,13 +643,22 @@ export function TradingPage() {
             )}
             {rightPanel === "tv-analysis" && (
               <div className="flex-1 overflow-hidden">
-                <TradingViewTechnicalAnalysis
-                  symbol={selectedSymbol}
-                  theme={isDark ? "dark" : "light"}
-                  interval={timeframe}
-                  width="100%"
-                  height="100%"
-                />
+                {barReplayActive ? (
+                  // The TradingView embed streams *live* values and would
+                  // contradict the replayed chart on screen.
+                  <div className="p-4 text-xs text-muted-foreground">
+                    Technical analysis is unavailable during bar replay — it reports live market
+                    data, which does not match the replayed bars.
+                  </div>
+                ) : (
+                  <TradingViewTechnicalAnalysis
+                    symbol={selectedSymbol}
+                    theme={isDark ? "dark" : "light"}
+                    interval={timeframe}
+                    width="100%"
+                    height="100%"
+                  />
+                )}
               </div>
             )}
           </div>

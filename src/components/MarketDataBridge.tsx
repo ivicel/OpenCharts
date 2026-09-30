@@ -177,6 +177,16 @@ export function MarketDataBridge() {
   useEffect(() => {
     const unsub = wsClient.subscribe("market-data", (event) => {
       const wsEvent = event as MarketDataEvent;
+      // Bar Replay owns the price axis while it runs: every panel reads the
+      // replayed price the replay engine publishes, so live ticks must not be
+      // allowed to overwrite it (and candles must not extend the frozen chart).
+      // Read the tag into a plain string first — comparing `wsEvent.eventType`
+      // directly would narrow the discriminated union for the code below.
+      const eventType: string = wsEvent.eventType;
+      if (useTradingStore.getState().liveFeedSuppressed) {
+        if (eventType === "MarketTick" || eventType === "HftLiveTick") return;
+        if (eventType === "CandleUpdate" || eventType === "CandleClosed") return;
+      }
       if (wsEvent.eventType === "MarketTick") {
         updateTick(wsEvent.symbol, wsEvent.bid, wsEvent.ask, toTimestamp(wsEvent.occurredAt));
       } else if ((wsEvent as { eventType: string }).eventType === "HftLiveTick") {
